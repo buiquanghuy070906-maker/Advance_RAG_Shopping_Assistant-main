@@ -3,6 +3,7 @@ import os
 import random
 import re
 import sys
+from threading import Thread
 
 import torch
 
@@ -17,9 +18,11 @@ from torch_geometric.data import Data
 
 from common.logger import get_logger
 from common.text import TextProcessor
-from databases.phone_db import PhoneDB
-from infrastructure.LLM.llm import LLM
-from infrastructure.LLM.PROMPT import extract_entity_relationship_prompt
+from model.phone_db import PhoneDB
+from service.LLM.llm import LLM
+from service.LLM.PROMPT import extract_entity_relationship_prompt
+
+from .gae import GAE  # Use relative import for local gae module
 
 warnings.filterwarnings("ignore")
 
@@ -41,9 +44,23 @@ class Neo4jGraph:
         self.db = PhoneDB()
         self.text_processor = TextProcessor()
 
-    def extract_entities_and_relationships(self, text: str):
-        prompt = extract_entity_relationship_prompt(text)
-        return self.llm.get_message(prompt)
+    def extract_entities_and_relationships(self, text, list_output=None):
+        def add_output(t):
+            list_output.append(self.llm.get_message(t))
+
+        if isinstance(text, str):
+            prompt = extract_entity_relationship_prompt(text)
+            return self.llm.get_message(prompt)
+        elif isinstance(text, list):
+            my_threads = []
+            for t in text:
+                if t is None or t == "":
+                    continue
+                my_thread = Thread(target=add_output, args=(t,))
+                my_thread.start()
+                my_threads.append(my_thread)
+            for my_thread in my_threads:
+                my_thread.join()
 
     def process_llm_out(self, result):
         response = result
@@ -178,10 +195,29 @@ class Neo4jGraph:
 
         return train_data, val_data, features
 
-    def get_all_graph_embeddings(self):
-        return torch.load(
-            r"E:\Python\Chatbot-RAG\src\infrastructure\graph\tensor_embedding.pt"
+    def get_all_graph_embeddings(
+        self, num_nodes, edge_list, model_path=r"models/best_gcn_model.pt"
+    ):
+        model = GAE(
+            input_dim=num_nodes,
+            hidden_dim=16,
+            embedding_dim=8,
         )
+
+        model.load_state_dict(torch.load(model_path))
+        model.eval()
+
+        edge_index = (
+            torch.tensor([[e[0], e[1]] for e in edge_list], dtype=torch.long)
+            .t()
+            .contiguous()
+        )
+        node_features = torch.eye(num_nodes)  # One-hot encoding for each node
+
+        with torch.no_grad():
+            embeddings, _ = model(node_features, edge_index)
+
+        return embeddings
 
     def close(self):
         self.driver.close()

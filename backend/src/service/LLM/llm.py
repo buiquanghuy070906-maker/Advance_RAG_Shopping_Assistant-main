@@ -5,7 +5,7 @@ import sys
 
 from dotenv import load_dotenv
 from google import genai
-from google.genai.types import GenerateContentConfig
+from google.genai.types import GenerateContentConfig, Part
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from common.logger import get_logger
@@ -22,7 +22,7 @@ class LLM:
         top_p: float = 0.5,
         top_k: int = 20,
         instructions: str = None,
-        save_history: bool = False,
+        history: list[dict] = None,
     ):
         self.keys = os.environ["API_KEY"].split(",")
         self.api_key_index = 0
@@ -33,21 +33,20 @@ class LLM:
         self.top_p = top_p
         self.top_k = top_k
         self.instructions = instructions
-
-        self.save_history = save_history
-
-        if self.save_history:
-            self.chat = self.model.start_chat()
+        self.num_try = 3
 
     def get_chat(self):
         return self.chat
+
+    def convert_openai_style_messages(self, messages):
+        return [Part(text=msg["content"]) for msg in messages]
 
     def get_message(
         self,
         prompt: str,
         stream: bool = False,
     ) -> str | None:
-        while self.api_key_index < len(self.keys):
+        while self.num_try > 0:
             try:
                 if not stream:
                     response = self.client.models.generate_content(
@@ -85,6 +84,9 @@ class LLM:
                     f"API key {self.keys[self.api_key_index]} with error {e} failed. Trying next key."
                 )
                 self.api_key_index += 1
+                if self.api_key_index >= len(self.keys):
+                    self.api_key_index = 0
+                    self.num_try -= 1
                 if self.api_key_index >= len(self.keys):
                     return "Internet error. Please check your connection."
                 self.client = genai.Client(api_key=self.keys[self.api_key_index])

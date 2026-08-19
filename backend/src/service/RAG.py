@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from collections import defaultdict
 
-from graph.graph import Neo4jGraph
+# Use relative import since graph is in the same service directory
+from .graph.graph import Neo4jGraph
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import torch
@@ -13,7 +15,7 @@ from dotenv import load_dotenv
 from rapidfuzz import process
 
 from common.text import TextProcessor
-from databases.phone_db import PhoneDB
+from model.phone_db import PhoneDB
 
 load_dotenv()
 
@@ -25,11 +27,18 @@ class RAG:
         )
 
         self.text_processor = TextProcessor()
-        self.graph = Neo4jGraph()  # Comment out until import issues are resolved
-        self.embeddings_graph_nodes = self.graph.get_all_graph_embeddings()
-        self.node_embeddings_norm = F.normalize(self.embeddings_graph_nodes, p=2, dim=1)
+        self.graph = Neo4jGraph()
+
         self.edge_list = self.graph.get_edge()
+        self.source_nodes = [e[0] for e in self.edge_list]
         self.node_mapping, _ = self.graph.get_node_mapping_id()
+        self.embeddings_graph_nodes = self.graph.get_all_graph_embeddings(
+            num_nodes=len(self.node_mapping), edge_list=self.edge_list
+        )
+        self.node_embeddings_norm = F.normalize(self.embeddings_graph_nodes, p=2, dim=1)
+        self.edge_lookup = {}
+        for src, tgt, rel in self.edge_list:
+            self.edge_lookup[(src, tgt)] = rel
 
     def get_senmatic_search_result(self, query, num_candidates=100, k=20) -> list[str]:
         db_information = self.db.vector_search(
@@ -40,20 +49,23 @@ class RAG:
 
         return self.text_processor.transform_query(db_information)
 
-    def get_graph_search_result(self, query, senmatic_k=5, graph_k=3) -> list[str]:
+    def get_graph_search_result(self, query, senmatic_k=5, graph_k=5) -> list[str]:
         senmatic_search_result = self.get_senmatic_search_result(
             query=query, k=senmatic_k
         )
         grouped_result = defaultdict(list)
-        matches = []
-        for smt in senmatic_search_result:
-            if smt is None or smt == "":
+        query_infos = []
+        query_entities = []
+        self.graph.extract_entities_and_relationships(
+            senmatic_search_result, list_output=query_infos
+        )
+        for query_info in query_infos:
+            if query_info is None or query_info == "":
                 continue
-            query_info = self.graph.extract_entities_and_relationships(smt)
-            query_entities, _ = self.graph.process_llm_out(query_info)
-            matches.extend(
-                self._find_closest_entities(query_entities, self.node_mapping)
-            )
+            query_entity, _ = self.graph.process_llm_out(query_info)
+            if query_entity:
+                query_entities.extend(query_entity)
+        matches = self._find_closest_entities(query_entities, self.node_mapping)
         if not matches or len(matches) == 0:
             return "Thông tin bổ sung:\n" + ".\n".join(senmatic_search_result)
 
@@ -79,12 +91,14 @@ class RAG:
             for idx in top_k_indices:
                 similar_node_id = idx.item()
                 # Check for direct connection in the edge list
-                direct_connections = [
-                    e
-                    for e in self.edge_list
-                    if (e[0] == match_id and e[1] == similar_node_id)
-                    or (e[1] == match_id and e[0] == similar_node_id)
-                ]
+                direct_connections = []
+                temp = self.edge_lookup.get((match_id, similar_node_id), None)
+                if temp is not None:
+                    direct_connections.append((match_id, similar_node_id, temp))
+                    if match_id in self.source_nodes:
+                        direct_connections.append((match_id, similar_node_id, temp))
+                    else:
+                        direct_connections.append((similar_node_id, match_id, temp))
                 if direct_connections:
                     for connection in direct_connections:
                         source = self.node_mapping[connection[0]]

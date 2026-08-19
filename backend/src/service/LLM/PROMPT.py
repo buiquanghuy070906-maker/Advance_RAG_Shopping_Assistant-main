@@ -19,6 +19,7 @@ def model_summary_chat_history_prompt() -> str:
     return SUMMARY_CHAT_HISTORY_PROMPT
 
 
+
 def extract_entity_relationship_prompt(text: str) -> str:
     return (
         "Extract entities (nodes) and their relationships (edges) from the text below."
